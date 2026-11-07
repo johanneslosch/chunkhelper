@@ -8,7 +8,7 @@ name: Release
 #   secret   CURSEFORGE_TOKEN            CurseForge API token
 #   variable CURSEFORGE_PROJECT_ID       numeric project ID (CurseForge project page, "About Project")
 #   variable CURSEFORGE_GAME_VERSIONS    optional, overrides the default "<minecraft_version>,Fabric,Client,Java 25"
-# Without CURSEFORGE_PROJECT_ID the CurseForge upload is skipped (GitHub release still happens).
+# The CurseForge upload always runs: without CURSEFORGE_TOKEN / CURSEFORGE_PROJECT_ID the workflow fails right away.
 
 on:
   push:
@@ -30,6 +30,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # full history + tags for the changelog
+
+      - name: Check CurseForge settings
+        env:
+          CF_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+          CF_PROJECT: ${{ vars.CURSEFORGE_PROJECT_ID }}
+        run: |
+          missing=0
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::error::Secret CURSEFORGE_TOKEN is not set (Settings -> Secrets and variables -> Actions -> Secrets)"
+            missing=1
+          fi
+          if [ -z "$CF_PROJECT" ]; then
+            echo "::error::Variable CURSEFORGE_PROJECT_ID is not set (Settings -> Secrets and variables -> Actions -> Variables)"
+            missing=1
+          fi
+          exit $missing
 
       - name: Set up Java 25
         uses: actions/setup-java@v4
@@ -104,9 +120,10 @@ jobs:
               --notes-file changelog.md
           fi
 
-      # last step, so a re-run after a failed CurseForge upload does not upload a duplicate file
+      # Runs whenever the jar was built, even if the GitHub release step failed.
+      # Last step, so a re-run after a failed CurseForge upload does not upload a duplicate file.
       - name: Upload to CurseForge
-        if: ${{ vars.CURSEFORGE_PROJECT_ID != '' }}
+        if: ${{ !cancelled() && steps.jar.outcome == 'success' }}
         uses: itsmeow/curseforge-upload@v3
         with:
           token: ${{ secrets.CURSEFORGE_TOKEN }}
@@ -119,7 +136,3 @@ jobs:
           release_type: release
           changelog: ${{ steps.version.outputs.changelog }}
           changelog_type: markdown
-
-      - name: CurseForge not configured
-        if: ${{ vars.CURSEFORGE_PROJECT_ID == '' }}
-        run: echo "::warning::CURSEFORGE_PROJECT_ID is not set, skipped the CurseForge upload."
