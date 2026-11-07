@@ -1,0 +1,125 @@
+name: Release
+
+# Every push to main builds the mod, publishes a GitHub release with the jar and uploads it to CurseForge.
+# Version: mod_version from gradle.properties (without -SNAPSHOT) + the workflow run number,
+# e.g. mod_version=1.0-SNAPSHOT and run 7 -> version 1.0.7, tag v1.0.7, chunkhelper-1.0.7.jar
+#
+# Repository settings (Settings -> Secrets and variables -> Actions):
+#   secret   CURSEFORGE_TOKEN            CurseForge API token
+#   variable CURSEFORGE_PROJECT_ID       numeric project ID (CurseForge project page, "About Project")
+#   variable CURSEFORGE_GAME_VERSIONS    optional, overrides the default "<minecraft_version>,Fabric,Client,Java 25"
+# Without CURSEFORGE_PROJECT_ID the CurseForge upload is skipped (GitHub release still happens).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for the changelog
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Determine version and changelog
+        id: version
+        env:
+          GAME_VERSIONS_OVERRIDE: ${{ vars.CURSEFORGE_GAME_VERSIONS }}
+        run: |
+          base=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          base=${base%-SNAPSHOT}
+          version="${base}.${GITHUB_RUN_NUMBER}"
+          minecraft=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          game_versions=${GAME_VERSIONS_OVERRIDE:-"${minecraft},Fabric,Client,Java 25"}
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "minecraft=$minecraft" >> "$GITHUB_OUTPUT"
+          echo "game_versions=$game_versions" >> "$GITHUB_OUTPUT"
+
+          # changelog = commit subjects since the previous release tag
+          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -n "$previous" ]; then range="$previous..HEAD"; else range="HEAD"; fi
+          git log --no-merges --pretty='- %s' "$range" | head -n 50 > changelog.md
+          if [ ! -s changelog.md ]; then echo "- Build of ${GITHUB_SHA::7}" > changelog.md; fi
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            cat changelog.md
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Building version $version for Minecraft $minecraft (CurseForge: $game_versions)"
+          cat changelog.md
+
+      - name: Build
+        run: |
+          chmod +x gradlew
+          ./gradlew build -Pmod_version=${{ steps.version.outputs.version }} --stacktrace
+
+      - name: Find jar
+        id: jar
+        run: |
+          jar=$(ls build/libs/*.jar | grep -v -- '-sources\.jar$' | head -n 1)
+          if [ -z "$jar" ]; then
+            echo "No jar found in build/libs" >&2
+            exit 1
+          fi
+          echo "path=$jar" >> "$GITHUB_OUTPUT"
+          echo "Release jar: $jar"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MINECRAFT: ${{ steps.version.outputs.minecraft }}
+          JAR: ${{ steps.jar.outputs.path }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # re-run of the same workflow run: replace the jar
+            gh release upload "$TAG" "$JAR" --clobber
+          else
+            gh release create "$TAG" "$JAR" \
+              --target "$GITHUB_SHA" \
+              --title "ChunkHelper $VERSION (Minecraft $MINECRAFT)" \
+              --notes-file changelog.md
+          fi
+
+      # last step, so a re-run after a failed CurseForge upload does not upload a duplicate file
+      - name: Upload to CurseForge
+        if: ${{ vars.CURSEFORGE_PROJECT_ID != '' }}
+        uses: itsmeow/curseforge-upload@v3
+        with:
+          token: ${{ secrets.CURSEFORGE_TOKEN }}
+          project_id: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          game_endpoint: minecraft
+          file_path: ${{ steps.jar.outputs.path }}
+          display_name: ChunkHelper ${{ steps.version.outputs.version }}
+          game_versions: ${{ steps.version.outputs.game_versions }}
+          relations: fabric-api:requiredDependency
+          release_type: release
+          changelog: ${{ steps.version.outputs.changelog }}
+          changelog_type: markdown
+
+      - name: CurseForge not configured
+        if: ${{ vars.CURSEFORGE_PROJECT_ID == '' }}
+        run: echo "::warning::CURSEFORGE_PROJECT_ID is not set, skipped the CurseForge upload."

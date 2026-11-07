@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "chunkhelper",
+  "version": "${version}",
+  "name": "ChunkHelper",
+  "description": "Shows which chunks an ender pearl or a player at a given position keeps loaded: /ch <x> <z> pearl|player",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/chunkhelper/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-datagen": [
+      "de.jlosch.chunkhelper.client.ChunkhelperDataGenerator"
+    ],
+    "client": [
+      "de.jlosch.chunkhelper.client.ChunkhelperClient"
+    ],
+    "main": [
+      "de.jlosch.chunkhelper.Chunkhelper"
+    ]
+  },
+  "mixins": [
+    "chunkhelper.mixins.json",
+    {
+      "config": "chunkhelper.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
