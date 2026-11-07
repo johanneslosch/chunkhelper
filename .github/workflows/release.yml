@@ -124,7 +124,7 @@ jobs:
       # Last step, so a re-run after a failed CurseForge upload does not upload a duplicate file.
       - name: Upload to CurseForge
         if: ${{ !cancelled() && steps.jar.outcome == 'success' }}
-        uses: itsmeow/curseforge-upload@v3
+        uses: itsmeow/curseforge-upload@v3 # "Upload to CurseForge" on the GitHub Marketplace
         with:
           token: ${{ secrets.CURSEFORGE_TOKEN }}
           project_id: ${{ vars.CURSEFORGE_PROJECT_ID }}
