@@ -8,6 +8,7 @@ name: Release
 #   secret   CURSEFORGE_TOKEN            CurseForge API token
 #   variable CURSEFORGE_PROJECT_ID       numeric project ID (CurseForge project page, "About Project")
 #   variable CURSEFORGE_GAME_VERSIONS    optional, overrides the default "<minecraft_version>,Fabric,Client,Java 25"
+#                                        (names, "Type name:name" or numeric IDs, comma separated)
 # The CurseForge upload always runs: without CURSEFORGE_TOKEN / CURSEFORGE_PROJECT_ID the workflow fails right away.
 
 on:
@@ -86,6 +87,64 @@ jobs:
           echo "Building version $version for Minecraft $minecraft (CurseForge: $game_versions)"
           cat changelog.md
 
+      # Resolves the names to numeric IDs, only from version types a mod may use (Minecraft, Modloader,
+      # Java, Environment). Plain names like "26.3" can also exist as Bukkit versions, which CurseForge
+      # rejects for mods ("belongs to an invalid dependency").
+      - name: Resolve CurseForge game versions
+        id: cf
+        env:
+          CF_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+          WANTED: ${{ steps.version.outputs.game_versions }}
+        run: |
+          curl --fail-with-body -sS -H "X-Api-Token: $CF_TOKEN" https://minecraft.curseforge.com/api/game/version-types -o types.json
+          curl --fail-with-body -sS -H "X-Api-Token: $CF_TOKEN" https://minecraft.curseforge.com/api/game/versions -o versions.json
+          python3 - <<'PY'
+          import json, os, sys
+
+          types = {t["id"]: t for t in json.load(open("types.json"))}
+          versions = json.load(open("versions.json"))
+          wanted = [w.strip() for w in os.environ["WANTED"].split(",") if w.strip()]
+
+          def type_of(v):
+              return types.get(v["gameVersionTypeID"], {"name": "?", "slug": "?"})
+
+          def valid_for_mods(t):
+              return t["slug"].startswith("minecraft-") or t["slug"] in ("modloader", "java", "environment")
+
+          ids, failed = [], False
+          for want in wanted:
+              if want.isdigit():
+                  ids.append(int(want))
+                  print(f"{want}: used as ID")
+                  continue
+              type_filter, name = (want.split(":", 1) if ":" in want else (None, want))
+              matches = [v for v in versions if name.lower() in (v["name"].lower(), v["slug"].lower())]
+              for v in matches:
+                  t = type_of(v)
+                  print(f"{want}: candidate id={v['id']} name={v['name']!r} type={t['name']!r} ({t['slug']})")
+              if type_filter:
+                  chosen = [v for v in matches if type_filter.lower() in (type_of(v)["name"].lower(), type_of(v)["slug"].lower())]
+              else:
+                  chosen = [v for v in matches if valid_for_mods(type_of(v))]
+              if not chosen:
+                  print(f"::error::No CurseForge game version '{want}' in a mod version type. Set CURSEFORGE_GAME_VERSIONS (names, 'Type:name' or IDs).")
+                  failed = True
+                  continue
+              # several hits: prefer real Minecraft version types, then the newest entry
+              chosen.sort(key=lambda v: (not type_of(v)["slug"].startswith("minecraft-"), -v["id"]))
+              v = chosen[0]
+              if len(chosen) > 1:
+                  print(f"::warning::'{want}' is ambiguous, using id={v['id']} ({type_of(v)['name']})")
+              print(f"{want}: using id={v['id']} ({type_of(v)['name']})")
+              ids.append(v["id"])
+
+          if failed:
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("game_version_ids=" + ",".join(str(i) for i in ids) + "\n")
+          print("CurseForge game version IDs:", ",".join(str(i) for i in ids))
+          PY
+
       - name: Build
         run: |
           chmod +x gradlew
@@ -131,7 +190,7 @@ jobs:
           game_endpoint: minecraft
           file_path: ${{ steps.jar.outputs.path }}
           display_name: ChunkHelper ${{ steps.version.outputs.version }}
-          game_versions: ${{ steps.version.outputs.game_versions }}
+          game_versions: ${{ steps.cf.outputs.game_version_ids }}
           relations: fabric-api:requiredDependency
           release_type: release
           changelog: ${{ steps.version.outputs.changelog }}
